@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board view | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=26">
+<link rel="stylesheet" href="desk.css?v=1">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="kanban"></i>Board view</h1>
+      <p>Rows are priority, columns are status. Drag a card sideways within its row, or use its dropdown, to change its status.</p>
+    </div>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <div id="board" class="bdl"></div>
+</div>
+<script src="core.js"></script>
+<script>
+const COLS = ['Pending', 'In Progress', 'Resolved'];
+const DOT = { 'Pending': 'var(--amber)', 'In Progress': 'var(--blue)', 'Resolved': 'var(--green)' };
+const LANES = [['u', 'Urgent', r => r.urgent], ['r', 'Regular', r => !r.urgent]];
+let dragLane = '';
+const card = (r, lane) => '<article class="bd-card" draggable="true" data-id="' + r.id + '" data-lane="' + lane + '">' +
+  '<div class="bd-top"><span class="id">' + r.id + '</span>' + (r.assignee ? '<span class="small">→ ' + esc(r.assignee) + '</span>' : '') + '</div>' +
+  '<p>' + esc(r.description) + '</p><div class="small">' + esc(r.category) + ' · ' + esc(r.location) + ' · ' + relativeTime(r.created) + '</div>' +
+  '<select class="bd-move" data-id="' + r.id + '" aria-label="Move ' + r.id + '">' + COLS.map(c => '<option' + (c === r.status ? ' selected' : '') + '>' + c + '</option>').join('') + '</select></article>';
+function pageRender() {
+  showAlert();
+  const list = insertionSort(records.toArray(), (a, b) => a.created - b.created);
+  let h = '<div class="bd-corner"></div>' + COLS.map(c => '<div class="bd-h"><span class="dt" style="background:' + DOT[c] + '"></span>' + c + '<b>' + list.filter(r => r.status === c).length + '</b></div>').join('');
+  LANES.forEach(l => {
+    const mine = list.filter(l[2]);
+    h += '<div class="bd-lane-label bd-l-' + l[0] + '">' + l[1] + '<small>' + mine.length + ' report' + (mine.length === 1 ? '' : 's') + '</small></div>';
+    COLS.forEach(c => { h += '<div class="bd-cell bd-l-' + l[0] + '" data-col="' + c + '" data-lane="' + l[0] + '">' + mine.filter(r => r.status === c).map(r => card(r, l[0])).join('') + '</div>'; });
+  });
+  $('board').innerHTML = h;
+  refreshIcons();
+}
+async function move(id, to) {
+  const r = records.findById(id);
+  if (!r || r.status === to) { render(); return; }
+  if (r.status === 'Pending' && to === 'Resolved' && !(await dkAsk({ tone: 'warn', title: 'Resolve without processing?', message: id + ' is still Pending. Mark it Resolved without processing it first?', ok: 'Mark resolved' }))) { render(); return; }
+  const from = r.status;
+  setStatus(r, to, true, { actor: 'board' });
+  render();
+  toast(id + ': ' + from + ' → ' + to, { actionLabel: 'Undo', onAction: () => undoLast() });
+}
+const bd = $('board');
+const clear = () => document.querySelectorAll('.drag,.over').forEach(x => x.classList.remove('drag', 'over'));
+bd.addEventListener('dragstart', e => { const c = e.target.closest('.bd-card'); if (!c) return; dragLane = c.dataset.lane; e.dataTransfer.setData('text/plain', c.dataset.id); c.classList.add('drag'); });
+bd.addEventListener('dragend', () => { clear(); dragLane = ''; });
+bd.addEventListener('dragover', e => {
+  const cell = e.target.closest('.bd-cell'); if (!cell || cell.dataset.lane !== dragLane) return;
+  e.preventDefault(); document.querySelectorAll('.over').forEach(x => x !== cell && x.classList.remove('over')); cell.classList.add('over');
+});
+bd.addEventListener('drop', e => {
+  const cell = e.target.closest('.bd-cell'); if (!cell || cell.dataset.lane !== dragLane) return;
+  e.preventDefault(); clear(); move(e.dataTransfer.getData('text/plain'), cell.dataset.col);
+});
+bd.addEventListener('change', e => { if (e.target.classList.contains('bd-move')) move(e.target.dataset.id, e.target.value); });
+render();
+</script>
+<script src="desk.js"></script>
+</body>
+</html>

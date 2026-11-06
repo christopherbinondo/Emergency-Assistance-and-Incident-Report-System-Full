@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=26">
+<link rel="stylesheet" href="desk.css?v=1">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="bar-chart-3"></i>Analytics</h1>
+      <p>Trends, hotspots and response times across all reports.</p>
+    </div>
+    <a class="btn" href="records.html"><i data-lucide="archive"></i>Open records</a>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <main>
+    <section class="panel wide reveal">
+      <h2><i data-lucide="trending-up"></i>Reports per day (last 14 days)</h2>
+      <p class="hint">Blue line = all reports that day. Amber dashed line = reports still open.</p>
+      <div id="trendChart" class="line-chart"></div>
+      <div class="legend"><span><i></i>Total reports</span><span><i class="open"></i>Still open</span></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="pie-chart"></i>By category</h2>
+      <div id="catChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="map-pin"></i>Top locations</h2>
+      <div id="locChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="timer"></i>Response time</h2>
+      <p class="hint">Time from report to first status change.</p>
+      <dl class="metric-grid">
+        <div><dt>Avg response</dt><dd id="mAvg">—</dd></div>
+        <div><dt>Fastest</dt><dd id="mFast">—</dd></div>
+        <div><dt>Slowest</dt><dd id="mSlow">—</dd></div>
+        <div><dt>Median</dt><dd id="mMed">—</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="users"></i>By staff</h2>
+      <div id="staffChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="zap"></i>Urgent vs regular</h2>
+      <div class="split-metric">
+        <div><span id="urgentPct" class="split-num">0%</span><span class="small">urgent</span></div>
+        <div class="split-bar"><div id="urgentBar" class="split-fill-urgent" style="width:0%"></div><div id="normalBar" class="split-fill-normal" style="width:100%"></div></div>
+      </div>
+      <p class="small" id="urgentDetail"></p>
+    </section>
+  </main>
+  <footer class="app-footer">All figures are calculated live from the data stored in this browser.</footer>
+</div>
+<script src="core.js"></script>
+<script>
+function pageRender() {
+  showAlert();
+  const all = records.toArray();
+  const open = all.filter(r => r.status !== 'Resolved');
+  const now = Date.now(), dayMs = 86400000;
+
+  const CH = 110;
+  const dayKey = t => { const d = new Date(t); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); };
+  const days = [], dayMap = {};
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - i);
+    const o = { label: d.toLocaleDateString([], { month: 'short', day: 'numeric' }), total: 0, open: 0 };
+    days.push(o); dayMap[dayKey(d.getTime())] = o;
+  }
+  all.forEach(r => {
+    const o = dayMap[dayKey(r.created)];
+    if (o) { o.total++; if (r.status !== 'Resolved') o.open++; }
+  });
+  drawTrend(days);
+
+  function hbars(target, data) {
+    const max = Math.max(1, ...data.map(x => x.n));
+    if (!data.length) { $(target).innerHTML = '<p class="small">No data yet.</p>'; return; }
+    $(target).innerHTML = data.map(x =>
+      '<div class="hbar"><span class="hbar-label" title="' + esc(x.k) + '">' + esc(x.k) + '</span>' +
+      '<div class="hbar-track"><div class="hbar-fill" style="width:' + (x.n / max * 100) + '%"></div></div>' +
+      '<span class="hbar-val">' + x.n + '</span></div>'
+    ).join('');
+  }
+
+  const catCount = {};
+  all.forEach(r => catCount[r.category] = (catCount[r.category] || 0) + 1);
+  hbars('catChart', insertionSort(Object.entries(catCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n));
+
+  const locCount = {};
+  all.forEach(r => { const k = (r.location || '').trim() || '(unspecified)'; locCount[k] = (locCount[k] || 0) + 1; });
+  hbars('locChart', insertionSort(Object.entries(locCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n).slice(0, 8));
+
+  const staffCount = {};
+  all.forEach(r => { const k = cleanName(r.assignee) || '(unassigned)'; staffCount[k] = (staffCount[k] || 0) + 1; });
+  hbars('staffChart', insertionSort(Object.entries(staffCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n));
+
+  const responses = [];
+  all.forEach(r => {
+    if (!r.timeline || !r.timeline.length) return;
+    for (let i = 0; i < r.timeline.length; i++) {
+      if (r.timeline[i].from !== 'Pending') continue;
+      responses.push(r.timeline[i].time - r.created);
+      break;
+    }
+  });
+  const fmtDur = ms => {
+    if (!ms || ms < 0) return '—';
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + ' min';
+    const h = Math.floor(m / 60), mm = m % 60;
+    if (h < 24) return h + 'h ' + mm + 'm';
+    const d = Math.floor(h / 24), hh = h % 24;
+    return d + 'd ' + hh + 'h';
+  };
+  if (responses.length) {
+    const sorted = insertionSort(responses, (a, b) => a - b);
+    const avg = responses.reduce((a, b) => a + b, 0) / responses.length;
+    $('mAvg').textContent = fmtDur(avg);
+    $('mFast').textContent = fmtDur(sorted[0]);
+    $('mSlow').textContent = fmtDur(sorted[sorted.length - 1]);
+    $('mMed').textContent = fmtDur(sorted[Math.floor(sorted.length / 2)]);
+  }
+
+  const urgent = all.filter(r => r.urgent).length;
+  const pct = all.length ? Math.round(urgent / all.length * 100) : 0;
+  $('urgentPct').textContent = pct + '%';
+  $('urgentBar').style.width = pct + '%';
+  $('normalBar').style.width = (100 - pct) + '%';
+  $('urgentDetail').textContent = urgent + ' urgent out of ' + all.length + ' total. ' + open.filter(r => r.urgent).length + ' still open urgent.';
+
+  refreshIcons();
+}
+
+let lastDays = [], lastW = 0;
+function drawTrend(days) {
+  lastDays = days;
+  const el = $('trendChart');
+  const W = Math.max(280, Math.floor(el.clientWidth || 640)); lastW = el.clientWidth;
+  const H = W < 520 ? 230 : 270;
+  const m = { t: 24, r: 18, b: 46, l: 36 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b, n = days.length;
+  const maxV = Math.max(1, ...days.map(d => d.total));
+  const step = maxV <= 5 ? 1 : Math.ceil(maxV / 5);
+  const top = Math.ceil(maxV / step) * step;
+  const x = i => m.l + (n < 2 ? iw / 2 : i * iw / (n - 1));
+  const y = v => m.t + ih - (v / top) * ih;
+  const every = 3;
+  const path = p => p.map((q, i) => (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1)).join(' ');
+  const tot = days.map((d, i) => [x(i), y(d.total)]);
+  const opn = days.map((d, i) => [x(i), y(d.open)]);
+  let g = '';
+  for (let v = 0; v <= top; v += step)
+    g += '<line class="lc-grid" x1="' + m.l + '" x2="' + (W - m.r) + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+         '<text class="lc-y" x="' + (m.l - 8) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + v + '</text>';
+  let labels = '', dots = '';
+  days.forEach((d, i) => {
+    if ((n - 1 - i) % every === 0)
+      labels += '<text class="lc-x" x="' + x(i) + '" y="' + (H - m.b + 20) + '" text-anchor="middle">' + d.label + '</text>';
+    const tip = d.label + ': ' + d.total + ' total, ' + d.open + ' open';
+    dots += '<g class="lc-pt"><title>' + tip + '</title><circle class="lc-hit" cx="' + x(i) + '" cy="' + y(d.total) + '" r="14"/>' +
+      (d.total ? '<circle class="lc-dot" cx="' + x(i) + '" cy="' + y(d.total) + '" r="3.5"/><text class="lc-val" x="' + x(i) + '" y="' + (y(d.total) - 11) + '">' + d.total + '</text>' : '') +
+      (d.open ? '<circle class="lc-odot" cx="' + x(i) + '" cy="' + y(d.open) + '" r="3.5"/>' : '') + '</g>';
+  });
+  const sum = days.reduce((a, d) => a + d.total, 0);
+  el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" role="img" aria-label="Line chart: ' + sum + ' reports in the last 14 days">' +
+    g + '<path class="lc-area" d="' + path(tot) + ' L' + x(n - 1).toFixed(1) + ' ' + y(0) + ' L' + x(0).toFixed(1) + ' ' + y(0) + ' Z"/>' +
+    '<path class="lc-line" d="' + path(tot) + '"/><path class="lc-open" d="' + path(opn) + '"/>' + dots + labels +
+    (sum ? '' : '<text class="lc-empty" x="' + W / 2 + '" y="' + (m.t + ih / 2 - 10) + '" text-anchor="middle">No reports in the last 14 days</text>') + '</svg>';
+}
+if (window.ResizeObserver) new ResizeObserver(() => { const el = $('trendChart'); if (el && el.clientWidth !== lastW && lastDays.length) drawTrend(lastDays); }).observe(document.querySelector('.content'));
+else window.addEventListener('resize', () => lastDays.length && drawTrend(lastDays));
+render();
+</script>
+<script src="desk.js"></script>
+</body>
+</html>
